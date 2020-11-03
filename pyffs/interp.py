@@ -1,14 +1,16 @@
 # #############################################################################
 # interp.py
 # ===========
-# Author : Sepand KASHANI [kashani.sepand@gmail.com]
+# Author :
+# Sepand KASHANI [kashani.sepand@gmail.com]
+# Eric BEZZAM [ebezzam@gmail.com]
 # #############################################################################
 
 
 import numpy as np
 
-from pyffs import util as _util
-from pyffs.czt import czt
+from pyffs.util import _index, _index_n, _verify_fs_interp_input
+from pyffs.czt import czt, cztn
 
 
 def fs_interp(x_FS, T, a, b, M, axis=-1, real_x=False):
@@ -32,9 +34,9 @@ def fs_interp(x_FS, T, a, b, M, axis=-1, real_x=False):
         Interval RHS.
     M : int
         Number of points to interpolate.
-    axis : int
+    axis : int, optional
         Dimension of `x_FS` along which the FS coefficients are stored.
-    real_x : bool
+    real_x : bool, optional
         If True, assume that `x_FS` is conjugate symmetric and use a more efficient algorithm. In
         this case, the FS coefficients corresponding to negative frequencies are not used.
 
@@ -129,38 +131,168 @@ def fs_interp(x_FS, T, a, b, M, axis=-1, real_x=False):
 
     See Also
     --------
-    :py:func:`~pyffs.czt.czt`
+    :py:func:`~pyffs.czt.czt`, :py:func:`~pyffs.interp.fs_interpn`
     """
-    if T <= 0:
-        raise ValueError("Parameter[T] must be positive.")
-    if not (a < b):
-        raise ValueError(f"Parameter[a] must be smaller than Parameter[b].")
-    if M <= 0:
-        raise ValueError("Parameter[M] must be positive.")
+    return fs_interpn(Phi_FS=x_FS, T=[T], a=[a], b=[b], M=[M], axes=tuple([axis]), real_Phi=real_x)
 
-    # Shape Parameters
-    N_FS = x_FS.shape[axis]
+
+def fs_interp2(Phi_FS, T_x, T_y, a_x, a_y, b_x, b_y, M_x, M_y, axes=(-2, -1), real_Phi=False):
+    r"""
+    Interpolate 2D bandlimited periodic signal.
+
+    If `Phi_FS` holds the Fourier Series coefficients of a 2D bandlimited periodic function
+    :math:`\phi(t): \mathbb{R}^2 \to \mathbb{C}`, then :py:func:`~pyffs.fs_interp2` computes the
+    values of :math:`\phi(t)` at points :math:`x_m = (a_x + \frac{b_x - a_x}{M_x - 1} k_x)
+    1_{[0,\ldots,M_x-1]}[k_x], y_n = (a_y + \frac{b_y - a_y}{M_y - 1} k_y)
+    1_{[0,\ldots,M_y-1]}[k_y]`.
+
+    Parameters
+    ----------
+    Phi_FS : :py:class:`~numpy.ndarray`
+        (..., N_FSx, N_FSy, ...) FS coefficients in ascending order.
+    T_x : float
+        Function period, x-axis.
+    T_y : float
+        Function period, y-axis.
+    a_x : float
+        Interval LHS, x-axis
+    a_y : float
+        Interval LHS, y-axis
+    b_x : float
+        Interval RHS, x-axis.
+    b_y : float
+        Interval RHS, y-axis.
+    M_x : int
+        Number of points to interpolate, x-axis.
+    M_y : int
+        Number of points to interpolate, y-axis.
+    axes : tuple, optional
+        Dimension of `Phi_FS` along which the FS coefficients are stored.
+    real_Phi : bool, optional
+        If True, assume that `Phi_FS` is conjugate symmetric and use a more efficient algorithm. In
+        this case, the FS coefficients corresponding to negative frequencies are not used.
+
+    Returns
+    -------
+    Phi : :py:class:`~numpy.ndarray`
+        (..., M_x, M_y, ...) interpolated values along the axes indicated by `axes`. If `real_x` is
+        :py:obj:`True`, the output is real-valued, otherwise it is complex-valued.
+
+    Notes
+    -----
+    Theory: :ref:`fp_interp_def`.
+
+    See Also
+    --------
+    :py:func:`~pyffs.czt.cztn`, :py:func:`~pyffs.interp.fs_interpn`
+    """
+
+    return fs_interpn(
+        Phi_FS=Phi_FS,
+        T=[T_x, T_y],
+        a=[a_x, a_y],
+        b=[b_x, b_y],
+        M=[M_x, M_y],
+        axes=axes,
+        real_Phi=real_Phi,
+    )
+
+
+def fs_interpn(Phi_FS, T, a, b, M, axes=None, real_Phi=False):
+    r"""
+    Interpolate D-dimensional bandlimited periodic signal.
+
+    Parameters
+    ----------
+    Phi_FS : :py:class:`~numpy.ndarray`
+        (..., N_FSx, N_FSy, ...) FS coefficients in ascending order.
+    T : list(float)
+        Function period along each dimension.
+    a : list(float)
+        Interval LHS for each dimension.
+    b : list(float)
+        Interval RHS for each dimension.
+    M : list(int)
+        Number of points to interpolate for each dimension.
+    axes : tuple, optional
+        Dimensions of `Phi_FS` along which the FS coefficients are stored.
+    real_Phi : bool, optional
+        Whether time samples are real-valued.
+
+    Returns
+    -------
+    Phi : :py:class:`~numpy.ndarray`
+        (..., M_1, M_2, ..., M_D, ...) interpolated values along the axes indicated by `axes`.
+        If `real_Phi` is :py:obj:`True`, the output is real-valued, otherwise it is complex-valued.
+
+    Notes
+    -----
+    Theory: :ref:`fp_interp_def`.
+
+    See Also
+    --------
+    :py:func:`~pyffs.czt.cztn`
+
+    """
+
+    axes = _verify_fs_interp_input(Phi_FS, T, a, b, M, axes)
+    D = len(axes)
+
+    # precompute modulation terms
+    N_FS = np.array(Phi_FS.shape)[list(axes)]
     N = (N_FS - 1) // 2
-    sh = [1] * x_FS.ndim
-    sh[axis] = M
+    A = []
+    W = []
+    sh = []
+    E = []
+    for d in range(D):
+        A.append(np.exp(-1j * 2 * np.pi / T[d] * a[d]))
+        W.append(np.exp(1j * (2 * np.pi / T[d]) * (b[d] - a[d]) / (M[d] - 1)))
+        sh.append([1] * Phi_FS.ndim)
+        sh[d][axes[d]] = M[d]
+        E.append(np.arange(M[d]))
 
-    A = np.exp(-1j * 2 * np.pi / T * a)
-    W = np.exp(1j * (2 * np.pi / T) * (b - a) / (M - 1))
-    E = np.arange(M)
+    if real_Phi and D < 3:
 
-    if real_x:  # Real-valued functions.
-        x0_FS = x_FS[_util._index(x_FS, axis, slice(N, N + 1))]
-        xp_FS = x_FS[_util._index(x_FS, axis, slice(N + 1, N_FS))]
-        C = np.reshape(W ** E, sh) / A
+        Phi0_FS = Phi_FS[_index_n(Phi_FS, axes, [slice(n, n + 1) for n in N])]
 
-        x = czt(xp_FS, A, W, M, axis=axis)
-        x *= 2 * C
-        x += x0_FS
-        x = x.real
+        if D == 1:
+            Phi_pos_FS = Phi_FS[_index(Phi_FS, axes[0], slice(N[0] + 1, N_FS[0]))]
+            C = np.reshape(W[0] ** E[0], sh[0]) / A[0]
+            Phi = czt(Phi_pos_FS, A[0], W[0], M[0], axis=axes[0])
+            Phi *= 2 * C
+            Phi += Phi0_FS
 
-    else:  # Complex-valued functions.
-        C = np.reshape(W ** (-N * E), sh) * (A ** N)
-        x = czt(x_FS, A, W, M, axis=axis)
-        x *= C
+        elif D == 2:
 
-    return x
+            # positive / positive
+            Phi_pos_pos_FS = Phi_FS[
+                _index_n(Phi_FS, axes, [slice(N[d], N_FS[d]) for d in range(D)])
+            ]
+            Phi_pos_pos = cztn(Phi_pos_pos_FS, A, W, M, axes=axes)
+
+            # negative / positive
+            Phi_neg_pos_FS = Phi_FS[
+                _index_n(Phi_FS, axes, [slice(0, N[0]), slice(N[1] + 1, N_FS[1])])
+            ]
+            Phi_neg_pos = cztn(Phi_neg_pos_FS, A, W, M, axes=axes)
+            Phi_neg_pos *= np.reshape(W[0] ** (-N[0] * E[0]), sh[0]) * (A[0] ** N[0])
+            Phi_neg_pos *= np.reshape(W[1] ** E[1], sh[1]) / A[1]
+
+            # exploit conjugate symmetry
+            Phi = 2 * Phi_pos_pos - Phi0_FS + 2 * Phi_neg_pos
+
+    else:
+
+        # apply CZT
+        Phi = cztn(Phi_FS, A, W, M, axes=axes)
+
+        # modulate along each dimension
+        for d in range(D):
+            C = np.reshape(W[d] ** (-N[d] * E[d]), sh[d]) * (A[d] ** N[d])
+            Phi *= C
+
+    if real_Phi:
+        return Phi.real
+    else:
+        return Phi
